@@ -38,6 +38,7 @@ export function detachSkillPolicy(current: BotSkillPolicy | undefined, name: str
 function describeSource(skill: SkillPackage): string {
   if (skill.source.type === 'github') return `github:${skill.source.owner}/${skill.source.repo}/${skill.source.path}`;
   if (skill.source.type === 'git') return `${skill.source.url}#${skill.source.path}`;
+  if (skill.source.type === 'agentbuddy') return `agentbuddy:${skill.source.identifier}`;
   return skill.source.type;
 }
 

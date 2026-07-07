@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -9,6 +9,7 @@ import { loadSkillPackage } from '../core/skills/package.js';
 import { skillRegistryPath, skillSourcesDir, skillStoreDir } from '../core/skills/registry-paths.js';
 import type { SkillPackage, SkillSource } from '../core/skills/types.js';
 import { assertAllowedGitProtocol, assertNoGitUrlCredentials, assertSafeGitRef, assertSafeGitSkillPath, githubToGitUrl, redactGitUrlCredentials } from '../core/skills/sources.js';
+import type { AgentbuddySource } from '../core/skills/sources.js';
 
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
 const execFileAsync = promisify(execFile);
@@ -342,6 +343,123 @@ async function installGitSkillAsyncLocked(opts: {
   return registry.skills[pkg.name];
 }
 
+// --- agentbuddy (external CLI) skill source ---------------------------------
+//
+// Delegates fetch + SSO auth + versioning to the operator-configured `agentbuddy`
+// binary (BOTMUX_AGENTBUDDY_CMD, default `agentbuddy`), captures the SKILL.md
+// dir(s) it writes into a throwaway staging project, and copies them into
+// botmux's own store. The registry host and login cache live entirely in the
+// agentbuddy binary + the daemon host's npmrc/login state, so no internal
+// registry domain ever enters botmux's (publicly-published) source.
+
+const DEFAULT_AGENTBUDDY_TIMEOUT_MS = 180_000;
+
+function agentbuddyCommand(): { bin: string; prefixArgs: string[] } {
+  const raw = (process.env.BOTMUX_AGENTBUDDY_CMD ?? 'agentbuddy').trim();
+  const parts = raw.split(/\s+/).filter(Boolean);
+  return parts.length > 0 ? { bin: parts[0], prefixArgs: parts.slice(1) } : { bin: 'agentbuddy', prefixArgs: [] };
+}
+
+function agentbuddyTimeoutMs(): number {
+  const raw = Number(process.env.BOTMUX_AGENTBUDDY_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_AGENTBUDDY_TIMEOUT_MS;
+}
+
+function agentbuddyInstallArgs(opts: AgentbuddySource): string[] {
+  // --copy: write real files (not symlinks into the user's agent dirs) so the
+  //         staging tree is self-contained to copy into the store.
+  // --strict: fail fast with "needs login" instead of blocking on an
+  //           interactive SSO prompt on a headless daemon host.
+  const common = ['--agent', 'claude-code', '--copy', '-y', '--strict'];
+  if (opts.collection) return ['skill', 'collection', 'add', opts.collection, ...common];
+  const args = ['skill', 'add', opts.group!, '--skill', opts.skill!];
+  if (opts.version) args.push('--version', opts.version);
+  return [...args, ...common];
+}
+
+function runAgentbuddy(args: string[], cwd: string): void {
+  const { bin, prefixArgs } = agentbuddyCommand();
+  try {
+    execFileSync(bin, [...prefixArgs, ...args], {
+      cwd,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: agentbuddyTimeoutMs(),
+    });
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') throw new Error('agentbuddy_not_found');
+    const stderr = Buffer.isBuffer(err?.stderr) ? err.stderr.toString('utf-8').trim() : String(err?.stderr ?? '').trim();
+    const stdout = Buffer.isBuffer(err?.stdout) ? err.stdout.toString('utf-8').trim() : String(err?.stdout ?? '').trim();
+    throw new Error(`agentbuddy_command_failed: ${stderr || stdout || err?.message || String(err)}`);
+  }
+}
+
+/** Depth-first scan for skill roots (dirs containing SKILL.md). Stops
+ *  descending once a SKILL.md is found so a skill's own resource files can't be
+ *  mistaken for nested skills. Skips node_modules / VCS dirs. */
+function findSkillDirs(root: string): string[] {
+  const found: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: string[];
+    try { entries = readdirSync(dir); } catch { return; }
+    if (entries.includes('SKILL.md')) { found.push(dir); return; }
+    for (const entry of entries) {
+      if (entry === 'node_modules' || entry.startsWith('.git')) continue;
+      const child = join(dir, entry);
+      let isDir = false;
+      try { isDir = statSync(child).isDirectory(); } catch { continue; }
+      if (isDir) walk(child);
+    }
+  };
+  walk(root);
+  return found;
+}
+
+export function installAgentbuddySkill(opts: AgentbuddySource): SkillPackage[] {
+  const identifier = opts.collection
+    ? `collection/${opts.collection}`
+    : `${opts.group}/${opts.skill}${opts.version ? `@${opts.version}` : ''}`;
+  const staging = join(skillSourcesDir(), 'agentbuddy', sourceId(identifier));
+  rmSync(staging, { recursive: true, force: true });
+  mkdirSync(staging, { recursive: true });
+  try {
+    runAgentbuddy(agentbuddyInstallArgs(opts), staging);
+    const dirs = findSkillDirs(staging);
+    if (dirs.length === 0) throw new Error('agentbuddy_no_skill_produced');
+    const now = new Date().toISOString();
+    const registry = readSkillRegistry();
+    const installed: SkillPackage[] = [];
+    const seen = new Set<string>();
+    for (const dir of dirs) {
+      const provisional = loadSkillPackage(dir, { source: { type: 'agentbuddy', identifier } });
+      if (seen.has(provisional.name)) continue; // same skill mirrored under multiple agent dirs
+      seen.add(provisional.name);
+      // A collection member re-installs via its collection; a single skill via
+      // its own group/skill/version — record whichever lets `update` re-run it.
+      const source: SkillSource = opts.collection
+        ? { type: 'agentbuddy', identifier, collection: opts.collection, skill: provisional.name }
+        : { type: 'agentbuddy', identifier, group: opts.group, skill: opts.skill, ...(opts.version ? { version: opts.version } : {}) };
+      const rootDir = join(skillStoreDir(), provisional.name);
+      rmSync(rootDir, { recursive: true, force: true });
+      mkdirSync(dirname(rootDir), { recursive: true });
+      cpSync(dir, rootDir, { recursive: true });
+      const pkg = loadSkillPackage(rootDir, { source, id: provisional.name });
+      registry.skills[pkg.name] = { ...pkg, installedAt: now, updatedAt: now };
+      installed.push(registry.skills[pkg.name]);
+    }
+    writeSkillRegistry(registry);
+    return installed;
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
+function agentbuddyReinstallOpts(source: Extract<SkillSource, { type: 'agentbuddy' }>): AgentbuddySource {
+  return source.collection
+    ? { collection: source.collection }
+    : { group: source.group, skill: source.skill, version: source.version };
+}
+
 export function removeInstalledSkill(name: string): { ok: true } | { ok: false; reason: string } {
   const registry = readSkillRegistry();
   const pkg = registry.skills[name];
@@ -384,6 +502,11 @@ export function updateInstalledSkill(name: string): { ok: true; skill: SkillPack
       }),
     };
   }
+  if (source.type === 'agentbuddy') {
+    const pkgs = installAgentbuddySkill(agentbuddyReinstallOpts(source));
+    const match = pkgs.find((pkg) => pkg.name === name) ?? pkgs[0];
+    return match ? { ok: true, skill: match } : { ok: false, reason: 'agentbuddy_update_failed' };
+  }
   return { ok: false, reason: `unsupported_source:${source.type}` };
 }
 
@@ -406,6 +529,11 @@ export async function updateInstalledSkillAsync(name: string): Promise<{ ok: tru
         sourceOverride: source,
       }),
     };
+  }
+  if (source.type === 'agentbuddy') {
+    const pkgs = installAgentbuddySkill(agentbuddyReinstallOpts(source));
+    const match = pkgs.find((pkg) => pkg.name === name) ?? pkgs[0];
+    return match ? { ok: true, skill: match } : { ok: false, reason: 'agentbuddy_update_failed' };
   }
   return { ok: false, reason: `unsupported_source:${source.type}` };
 }

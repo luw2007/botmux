@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { githubToGitUrl, parseSkillInstallSource } from './sources.js';
 import { validateSkillPackageDir } from './package.js';
 import {
+  installAgentbuddySkill,
   installGitSkill,
   installLocalSkill,
   readSkillRegistry,
@@ -187,8 +188,13 @@ export function runSkillsAdminCommand(args: string[]): AdminCommandResult {
     }
     if (sub === 'install') {
       const source = args[1];
-      if (!source) return { code: 2, stdout: '', stderr: 'usage: botmux skills install <path|git|github>\n' };
+      if (!source) return { code: 2, stdout: '', stderr: 'usage: botmux skills install <path|git|github|agentbuddy>\n' };
       const parsed = parseSkillInstallSource(source);
+      if (parsed.kind === 'agentbuddy') {
+        const pkgs = installAgentbuddySkill(parsed.agentbuddy!);
+        if (pkgs.length === 0) return { code: 1, stdout: '', stderr: 'agentbuddy_no_skill_produced\n' };
+        return { code: 0, stdout: `installed ${pkgs.map((pkg) => pkg.name).join(', ')}\n`, stderr: '' };
+      }
       if (parsed.kind === 'local') {
         const pkg = installLocalSkill(parsed.value, { link: hasFlag(args, '--link') });
         return { code: 0, stdout: `installed ${pkg.name}\n`, stderr: '' };

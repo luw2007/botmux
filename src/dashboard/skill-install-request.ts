@@ -56,6 +56,12 @@ export function parseDashboardSkillInstallRequest(body: Record<string, unknown>)
   const source = typeof body.source === 'string' ? body.source.trim() : '';
   if (!source) throw new Error('source_required');
   const parsedSource = parseSkillInstallSource(source);
+  if (parsedSource.kind === 'agentbuddy') {
+    // agentbuddy fetch is a synchronous, minutes-long external CLI call (and may
+    // need a one-time SSO login on the host) — keep it off the daemon event loop
+    // and on the deploy-host CLI: `botmux skills install agentbuddy:<id>`.
+    throw new Error('agentbuddy_install_cli_only');
+  }
   if (parsedSource.kind === 'local') {
     return { kind: 'local', value: parsedSource.value, link: body.link === true || shouldAutoLinkLocalSkillPath(parsedSource.value) };
   }
