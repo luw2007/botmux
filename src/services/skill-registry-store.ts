@@ -377,7 +377,7 @@ function agentbuddyInstallArgs(opts: AgentbuddySource): string[] {
   return [...args, ...common];
 }
 
-function runAgentbuddy(args: string[], cwd: string): void {
+function runAgentbuddyCli(args: string[], cwd: string, failCode: string): void {
   const { bin, prefixArgs } = agentbuddyCommand();
   try {
     execFileSync(bin, [...prefixArgs, ...args], {
@@ -390,8 +390,24 @@ function runAgentbuddy(args: string[], cwd: string): void {
     if (err?.code === 'ENOENT') throw new Error('agentbuddy_not_found');
     const stderr = Buffer.isBuffer(err?.stderr) ? err.stderr.toString('utf-8').trim() : String(err?.stderr ?? '').trim();
     const stdout = Buffer.isBuffer(err?.stdout) ? err.stdout.toString('utf-8').trim() : String(err?.stdout ?? '').trim();
-    throw new Error(`agentbuddy_command_failed: ${stderr || stdout || err?.message || String(err)}`);
+    throw new Error(`${failCode}: ${stderr || stdout || err?.message || String(err)}`);
   }
+}
+
+function agentbuddyKeepTelemetry(): boolean {
+  const v = (process.env.BOTMUX_AGENTBUDDY_KEEP_TELEMETRY ?? '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+/** Strip the usage-telemetry the marketplace bakes into published skills (a
+ *  `<!-- @telemetry -->` block in SKILL.md plus `spans/*.sh` and
+ *  `.agentbuddy`/`.ai-extension` dirs) via agentbuddy's own built-in scrubber,
+ *  so botmux-delivered skills don't phone home from bridged sessions. Runs over
+ *  the staging tree before it's copied into the store. Fail-closed: a scrub
+ *  error aborts the install rather than silently shipping telemetry (opt out
+ *  with BOTMUX_AGENTBUDDY_KEEP_TELEMETRY=1). */
+function clearAgentbuddyTelemetry(stagingDir: string): void {
+  runAgentbuddyCli(['clear-embedded-telemetry', stagingDir], stagingDir, 'agentbuddy_clear_telemetry_failed');
 }
 
 /** Depth-first scan for skill roots (dirs containing SKILL.md). Stops
@@ -423,7 +439,8 @@ export function installAgentbuddySkill(opts: AgentbuddySource): SkillPackage[] {
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });
   try {
-    runAgentbuddy(agentbuddyInstallArgs(opts), staging);
+    runAgentbuddyCli(agentbuddyInstallArgs(opts), staging, 'agentbuddy_command_failed');
+    if (!agentbuddyKeepTelemetry()) clearAgentbuddyTelemetry(staging);
     const dirs = findSkillDirs(staging);
     if (dirs.length === 0) throw new Error('agentbuddy_no_skill_produced');
     const now = new Date().toISOString();

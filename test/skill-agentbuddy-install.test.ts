@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -11,18 +11,46 @@ import {
 } from '../src/services/skill-registry-store.js';
 
 // A stand-in for the real `agentbuddy` CLI. It writes the SKILL.md tree that the
-// real binary would produce with `--agent claude-code --copy` into $CWD, so the
-// wrapper's capture+register path is exercised without any network/SSO.
+// real binary would produce with `--agent claude-code --copy` into $CWD, and
+// implements `clear-embedded-telemetry` (strip @telemetry block + spans dir),
+// so the wrapper's capture + telemetry-scrub + register path is exercised
+// without any network/SSO. FAKE_AB_TELEMETRY=1 makes installs carry telemetry.
 const FAKE_AGENTBUDDY = `
-const { mkdirSync, writeFileSync } = require('node:fs');
+const { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 if (process.env.FAKE_AB_FAIL === '1') { process.stderr.write('needs login\\n'); process.exit(1); }
 if (process.env.FAKE_AB_EMPTY === '1') { process.exit(0); }
 const argv = process.argv.slice(2);
+const TEL_START = '<!-- @telemetry:start -->';
+const TEL_END = '<!-- @telemetry:end -->';
+if (argv[0] === 'clear-embedded-telemetry') {
+  const base = argv[1] || process.cwd();
+  const skillsDir = join(base, '.claude', 'skills');
+  if (existsSync(skillsDir)) {
+    for (const name of readdirSync(skillsDir)) {
+      const sk = join(skillsDir, name);
+      const md = join(sk, 'SKILL.md');
+      if (existsSync(md)) {
+        let c = readFileSync(md, 'utf-8');
+        const s = c.indexOf(TEL_START), e = c.indexOf(TEL_END);
+        if (s >= 0 && e >= 0) c = (c.slice(0, s) + c.slice(e + TEL_END.length)).replace(/\\n{3,}/g, '\\n\\n');
+        writeFileSync(md, c);
+      }
+      rmSync(join(sk, 'spans'), { recursive: true, force: true });
+    }
+  }
+  process.exit(0);
+}
 function writeSkill(name, desc) {
   const dir = join(process.cwd(), '.claude', 'skills', name);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'SKILL.md'), '---\\nname: ' + name + '\\ndescription: ' + desc + '\\n---\\n# ' + name);
+  let body = '---\\nname: ' + name + '\\ndescription: ' + desc + '\\n---\\n# ' + name;
+  if (process.env.FAKE_AB_TELEMETRY === '1') {
+    body += '\\n\\n' + TEL_START + '\\nrun spans/telemetry.sh\\n' + TEL_END + '\\n';
+    mkdirSync(join(dir, 'spans'), { recursive: true });
+    writeFileSync(join(dir, 'spans', 'telemetry.sh'), 'echo hi');
+  }
+  writeFileSync(join(dir, 'SKILL.md'), body);
   writeFileSync(join(dir, 'helper.md'), 'resource for ' + name);
 }
 if (argv[1] === 'collection') {
@@ -49,6 +77,8 @@ describe('agentbuddy skill install', () => {
     vi.stubEnv('BOTMUX_AGENTBUDDY_CMD', `node ${fakeBin}`);
     vi.stubEnv('FAKE_AB_FAIL', '');
     vi.stubEnv('FAKE_AB_EMPTY', '');
+    vi.stubEnv('FAKE_AB_TELEMETRY', '');
+    vi.stubEnv('BOTMUX_AGENTBUDDY_KEEP_TELEMETRY', '');
   });
 
   afterEach(() => {
@@ -83,6 +113,25 @@ describe('agentbuddy skill install', () => {
       collection: 'vwx6HZoo',
       skill: 'vwx6HZoo-alpha',
     });
+  });
+
+  it('strips embedded telemetry before copying the skill into the store', () => {
+    vi.stubEnv('FAKE_AB_TELEMETRY', '1');
+    const [pkg] = installAgentbuddySkill({ group: 'g/h', skill: 'deploy' });
+
+    const stored = readFileSync(join(pkg.rootDir, 'SKILL.md'), 'utf-8');
+    expect(stored).not.toContain('@telemetry');
+    expect(stored).toContain('# deploy');
+    expect(existsSync(join(pkg.rootDir, 'spans'))).toBe(false);
+  });
+
+  it('keeps telemetry when BOTMUX_AGENTBUDDY_KEEP_TELEMETRY is set', () => {
+    vi.stubEnv('FAKE_AB_TELEMETRY', '1');
+    vi.stubEnv('BOTMUX_AGENTBUDDY_KEEP_TELEMETRY', '1');
+    const [pkg] = installAgentbuddySkill({ group: 'g/h', skill: 'deploy' });
+
+    expect(readFileSync(join(pkg.rootDir, 'SKILL.md'), 'utf-8')).toContain('@telemetry');
+    expect(existsSync(join(pkg.rootDir, 'spans'))).toBe(true);
   });
 
   it('updates an installed agentbuddy skill by re-running its source', () => {
