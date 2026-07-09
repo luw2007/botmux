@@ -5935,8 +5935,8 @@ function getTerminalHtml(hasWrite: boolean, platformReadonly = false, loginUrl =
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;background:#1a1b26;overflow:hidden;overscroll-behavior:none}
-body{display:flex;flex-direction:column}
+html,body{width:100%;height:100%;background:#1a1b26;overflow:hidden;overscroll-behavior:none}
+body{display:flex;flex-direction:column;height:100vh;height:100dvh}
 #safe-area-probe{position:fixed;visibility:hidden;pointer-events:none;
   padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
 #toolbar-shell{--toolbar-scale:1;display:none;position:fixed;z-index:100;
@@ -5991,7 +5991,7 @@ body{display:flex;flex-direction:column}
   background:rgba(36,40,59,0.74)!important;touch-action:none}
 #toolbar.idle{opacity:.82}
 @media(prefers-reduced-motion:reduce){#toolbar,#toolbar.collapsed{transition:opacity .12s linear}}
-#terminal{flex:1;min-height:0}
+#terminal{flex:1;min-width:0;min-height:0;width:100%;height:100%}
 #terminal .xterm{height:100%}
 /* Real scroll container is xterm's own viewport — kill iOS rubber-band bounce
    and momentum here (not just on body), and reserve gestures for pinch-zoom so
@@ -6056,7 +6056,7 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0/lib/addon-canvas.min.js"></script>
 <script>
 var isTouch='ontouchstart'in window||navigator.maxTouchPoints>0;
-if(isTouch){document.getElementById('vp').content='width=1100,viewport-fit=cover';document.body.classList.add('touch');}
+if(isTouch){document.body.classList.add('touch');}
 var hasToken=${hasWrite};
 var platformReadonly=${platformReadonly};
 if(!hasToken){
