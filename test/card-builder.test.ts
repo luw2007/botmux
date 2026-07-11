@@ -814,6 +814,22 @@ describe('buildRepoSelectCard', () => {
       expect(selectStatic.options).toHaveLength(3);
     });
 
+    it.each([false, true])('caps large scans by count and UTF-8 bytes (multiPicker=%s)', (multiPicker) => {
+      const manyProjects: ProjectInfo[] = Array.from({ length: 806 }, (_, i) => ({
+        name: `项目-${i}-${'很长'.repeat(20)}`,
+        path: `/home/user/${i}/${'很长的目录/'.repeat(80)}`,
+        type: 'repo',
+        branch: `feature-${'分支'.repeat(20)}`,
+      }));
+      const json = buildRepoSelectCard(manyProjects, undefined, undefined, undefined, multiPicker);
+      const card = parse(json);
+      const selects = deepFind(card, 'select_static');
+      const repoSwitch = selects.find((select: any) => select.value?.key === 'repo_switch');
+      expect(repoSwitch.options.length).toBeGreaterThan(0);
+      expect(repoSwitch.options.length).toBeLessThan(100);
+      expect(Buffer.byteLength(json, 'utf8')).toBeLessThan(100_000);
+    });
+
     it('should use 1-based numbering in option text', () => {
       const card = parse(buildRepoSelectCard(projects));
       const actionEl = card.elements.find((e: any) => e.tag === 'action');

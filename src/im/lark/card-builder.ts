@@ -1003,9 +1003,27 @@ function worktreeMultiForm(worktreeOptions: Array<{ text: { tag: 'plain_text'; c
 /** Repo selection card. `multiPicker` (persisted per-bot via worktreeMultiPicker)
  *  flips the worktree control between an instant single-select dropdown (false)
  *  and the inline multi-select form (true). */
+const REPO_SELECT_OPTION_LIMIT = 100;
+const REPO_SELECT_OPTIONS_BYTE_LIMIT = 60_000;
+
 export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: string, rootMessageId?: string, locale?: Locale, multiPicker?: boolean): string {
   const currentMarker = t('card.repo.current_marker', undefined, locale);
-  const options = projects.map((p, i) => {
+  const visibleProjects: ProjectInfo[] = [];
+  let optionBytes = 0;
+  for (const project of projects.slice(0, REPO_SELECT_OPTION_LIMIT)) {
+    const currentTag = project.path === currentPath ? currentMarker : '';
+    const typeTag = project.type === 'worktree' ? ' [worktree]' : '';
+    const switchOption = { text: { tag: 'plain_text', content: `${visibleProjects.length + 1}. ${project.name} (${project.branch})${typeTag}${currentTag}` }, value: project.path };
+    const worktreeOption = project.type === 'repo'
+      ? { text: { tag: 'plain_text', content: `${project.name} (${project.branch})` }, value: project.path }
+      : undefined;
+    const bytes = Buffer.byteLength(JSON.stringify(switchOption))
+      + (worktreeOption ? Buffer.byteLength(JSON.stringify(worktreeOption)) : 0);
+    if (optionBytes + bytes > REPO_SELECT_OPTIONS_BYTE_LIMIT) break;
+    optionBytes += bytes;
+    visibleProjects.push(project);
+  }
+  const options = visibleProjects.map((p, i) => {
     const currentTag = p.path === currentPath ? currentMarker : '';
     const typeTag = p.type === 'worktree' ? ' [worktree]' : '';
     return {
@@ -1017,7 +1035,7 @@ export function buildRepoSelectCard(projects: ProjectInfo[], currentPath?: strin
   // Second dropdown: open a repo as a NEW worktree (branched off its remote
   // default branch). Only main checkouts make sense as sources — existing
   // worktrees of the same repo would just duplicate the list.
-  const worktreeOptions = projects
+  const worktreeOptions = visibleProjects
     .filter(p => p.type === 'repo')
     .map(p => ({
       text: { tag: 'plain_text' as const, content: `${p.name} (${p.branch})` },
