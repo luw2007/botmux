@@ -12,7 +12,7 @@
  *   botmux logs [--lines] — view daemon logs
  *   botmux status         — show daemon status
  *   botmux upgrade        — upgrade to latest version
- *   botmux list           — interactive session picker (TUI), attach to tmux
+ *   botmux list           — interactive session picker (TUI), attach to persistent backend
  *   botmux list --plain   — plain table output (for piping / scripts)
  *   botmux delete <id>    — close a session by ID prefix
  *   botmux delete all     — close all active sessions
@@ -68,15 +68,14 @@ import { scheduleTimeZone } from './utils/timezone.js';
 import { expandHomePath, invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
 import { isColdResumeDormant, sessionListDisposition } from './cli/session-list-liveness.js';
+import { resolveSessionBackendType, sessionAttachCommand } from './cli/session-backend-attach.js';
 import { dispatchPrimaryMessage, findStdinAliasAttachment, normalizeInteractiveCardInput, sendFileAttachments, sendVideoAttachments, shouldSendAsPureVideo, validateVideoAttachments } from './cli/send-dispatch.js';
 import { buildPm2SpawnCommand } from './cli/pm2-command.js';
 import { callDashboard, type DashboardEndpoint, type DashboardResult } from './cli/dashboard-endpoint.js';
 import { installLatestBotmuxSync } from './core/maintenance.js';
-import {
-  formatGlobalInstallCommand,
-  resolveGlobalInstallPlan,
-  UnsupportedGlobalInstallError,
-} from './utils/global-install.js';
+import { formatGlobalInstallCommand, resolveGlobalInstallPlan, UnsupportedGlobalInstallError, } from './utils/global-install.js';
+import { npmGlobalUpdateCwd } from './core/maintenance.js';
+import { isSuspendableBackendType, killPersistentSession, persistentSessionName, probePersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
 import { loadDashboardSecret } from './dashboard/auth.js';
 import { rejectLikelyWindowsStdinMojibake, decodeStdinBytes } from './cli/stdin-encoding.js';
 import {
@@ -2740,6 +2739,7 @@ interface SessionData {
   /** Deliberately suspended by the resident-session cap. No process/backing
    * session is expected until the next message cold-resumes the CLI. */
   suspendedColdResume?: boolean;
+  backendType?: 'pty' | PersistentBackendType;
 }
 
 /**
@@ -2965,7 +2965,7 @@ function padEndDisplay(str: string, targetWidth: number): string {
 }
 
 /** Load bot configs for display (best effort — returns empty array on failure) */
-function loadBotConfigsForDisplay(): Array<{ larkAppId: string; cliId?: string }> {
+function loadBotConfigsForDisplay(): Array<{ larkAppId: string; cliId?: string; backendType?: SessionData['backendType'] }> {
   if (existsSync(BOTS_JSON_FILE)) {
     try { return JSON.parse(readFileSync(BOTS_JSON_FILE, 'utf-8')); } catch { /* ignore */ }
   }
@@ -3101,14 +3101,37 @@ function sessionStatusLabel(s: SessionData): string {
   return s.pid && isProcessAlive(s.pid) ? 'online' : s.pid ? 'stopped' : 'idle';
 }
 
-function sessionTargetLabel(s: SessionData, tmuxName?: string, hasTmux?: boolean): string {
+function sessionBackendType(s: SessionData): SessionData['backendType'] {
+  const botBackend = loadBotConfigsForDisplay().find(bot => bot.larkAppId === s.larkAppId)?.backendType;
+  return resolveSessionBackendType(s.backendType, botBackend);
+}
+
+function sessionBackend(s: SessionData): PersistentBackendType | undefined {
+  const backendType = sessionBackendType(s);
+  return isSuspendableBackendType(backendType) ? backendType : undefined;
+}
+
+function sessionHasBackingSession(s: SessionData): boolean {
+  const backendType = sessionBackendType(s);
+  if (backendType === 'pty') return false;
+  const backend = sessionBackend(s);
+  const name = backend ? persistentSessionName(backend, s.sessionId) : `bmx-${s.sessionId.substring(0, 8)}`;
+  return backend ? probePersistentSession(backend, name) !== 'missing' : tmuxSessionExists(name);
+}
+
+function sessionTargetLabel(s: SessionData, backendName?: string, hasBackend?: boolean): string {
   if (isAdoptedSession(s)) return adoptTargetLabel(s);
-  if (hasTmux === undefined) {
-    const name = tmuxName ?? `bmx-${s.sessionId.substring(0, 8)}`;
-    hasTmux = tmuxSessionExists(name);
-    tmuxName = name;
+  const backendType = sessionBackendType(s);
+  const backend = sessionBackend(s);
+  if (backendType === 'pty') return 'pty';
+  if (hasBackend === undefined) {
+    const name = backendName ?? `bmx-${s.sessionId.substring(0, 8)}`;
+    hasBackend = backend
+      ? probePersistentSession(backend, name) === 'exists'
+      : tmuxSessionExists(name);
+    backendName = name;
   }
-  return hasTmux ? `tmux: ${tmuxName}` : '-';
+  return hasBackend ? `${backend ?? 'tmux'}: ${backendName}` : '-';
 }
 
 /** Shorten path for display: replace $HOME with ~. */
@@ -3155,17 +3178,22 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
     session: SessionData;
     text: string;
     alive: boolean;
-    tmuxName: string;
-    hasTmux: boolean;
+    backend?: PersistentBackendType;
+    backendName: string;
+    hasBackend: boolean;
     isAdopt: boolean;
     targetLabel: string;
     canAttach: boolean;
   }> {
     return active.map(s => {
-      const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
+      const backendType = sessionBackendType(s);
+      const backend = sessionBackend(s);
+      const backendName = backend ? persistentSessionName(backend, s.sessionId) : `bmx-${s.sessionId.substring(0, 8)}`;
       const isAdopt = isAdoptedSession(s);
-      const hasTmux = !isAdopt && tmuxSessionExists(tmuxName);
-      const targetLabel = sessionTargetLabel(s, tmuxName, hasTmux);
+      const hasBackend = !isAdopt && backendType !== 'pty' && (backend
+        ? probePersistentSession(backend, backendName) === 'exists'
+        : tmuxSessionExists(backendName));
+      const targetLabel = sessionTargetLabel(s, backendName, hasBackend);
       // Build row text with shortened dir
       const id = padEndDisplay(s.sessionId.substring(0, 8), cols.id);
       const parts = [id];
@@ -3183,7 +3211,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       const target = padEndDisplay(truncate(targetLabel, cols.target), cols.target);
       parts.push(title, dir, pid, uptime, status, target);
 
-      return { session: s, text: parts.join(' │ '), alive, tmuxName, hasTmux, isAdopt, targetLabel, canAttach: hasTmux && !isAdopt };
+      return { session: s, text: parts.join(' │ '), alive, backend, backendName, hasBackend, isAdopt, targetLabel, canAttach: hasBackend && !isAdopt };
     });
   }
 
@@ -3244,9 +3272,9 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
     const selected = rows[cursor];
     const targetHint = selected.isAdopt
       ? `\x1b[33m${selected.targetLabel}\x1b[0m  \x1b[2mEnter 已禁用；请直接使用原 tmux/zellij/herdr 客户端。\x1b[0m`
-      : selected.hasTmux
-        ? `\x1b[32mtmux: ${selected.tmuxName}\x1b[0m`
-        : `\x1b[2mtmux: 无会话\x1b[0m`;
+      : selected.hasBackend
+        ? `\x1b[32m${selected.backend ?? 'tmux'}: ${selected.backendName}\x1b[0m`
+        : `\x1b[2m${sessionBackendType(selected.session) ?? 'tmux'}: 无会话\x1b[0m`;
     process.stdout.write(`\n  ${targetHint}\n`);
 
     // Flash message or confirmation prompt
@@ -3291,9 +3319,12 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
         killProcess(s.pid);
       }
 
-      // Kill only botmux-owned tmux sessions. Adopted panes belong to the user.
-      if (!r.isAdopt && r.hasTmux) {
-        try { execSync(`tmux kill-session -t '${r.tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() }); } catch { /* */ }
+      // Kill only botmux-owned persistent sessions. Adopted panes belong to the user.
+      if (!r.isAdopt) {
+        if (r.backend) killPersistentSession(r.backend, r.backendName);
+        else if (sessionBackendType(s) !== 'pty') {
+          try { execSync(`tmux kill-session -t '${r.backendName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() }); } catch { /* legacy tmux session */ }
+        }
       }
 
       // Mark closed & persist
@@ -3359,7 +3390,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
         return;
       }
 
-      // Enter — attach to tmux
+      // Enter — attach to the session's persistent backend
       if (key === '\r' || key === '\n') {
         const selected = rows[cursor];
         if (selected.isAdopt) {
@@ -3368,15 +3399,16 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
           return;
         }
         if (!selected.canAttach) {
-          flashMsg = '\x1b[33m该会话没有 tmux，无法连接\x1b[0m';
+          flashMsg = `\x1b[33m该会话没有可连接的 ${sessionBackendType(selected.session) ?? 'tmux'} 后端\x1b[0m`;
           render();
           return;
         }
-        applyTmuxWindowSizeLargest(selected.tmuxName);
+        if ((selected.backend ?? 'tmux') === 'tmux') applyTmuxWindowSizeLargest(selected.backendName);
         cleanup();
-        spawnSync('tmux', ['attach-session', '-t', selected.tmuxName], {
+        const { command, args } = sessionAttachCommand(selected.backend ?? 'tmux', selected.backendName);
+        spawnSync(command, args, {
           stdio: 'inherit',
-          env: tmuxEnv(),
+          env: command === 'tmux' ? tmuxEnv() : process.env,
         });
         resolve();
         return;
@@ -3415,8 +3447,8 @@ async function cmdList(): Promise<void> {
     }
 
     const hasPid = !!(s.pid && isProcessAlive(s.pid));
-    const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
-    const disposition = sessionListDisposition(s, { hasPid, hasBackingSession: hasTmux });
+    const hasBackingSession = sessionHasBackingSession(s);
+    const disposition = sessionListDisposition(s, { hasPid, hasBackingSession });
     if (disposition === 'prune_real') pruned.push(s);
     else if (disposition === 'prune_scratch') prunedScratch.push(s);
     else live.push(s);
@@ -3479,8 +3511,7 @@ function cmdDelete(): void {
         return pid ? !isProcessAlive(pid) : !(s.pid && isProcessAlive(s.pid));
       }
       const hasPid = !!(s.pid && isProcessAlive(s.pid));
-      const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
-      return !hasPid && !hasTmux;
+      return !hasPid && !sessionHasBackingSession(s);
     });
     if (toDelete.length === 0) {
       console.log('没有 stopped 状态的会话。');
@@ -3513,14 +3544,20 @@ function cmdDelete(): void {
       console.log(`  killed pid ${s.pid}`);
     }
 
-    // Kill associated botmux-owned tmux session if it exists. Adopted panes
+    // Kill associated botmux-owned persistent session if it exists. Adopted panes
     // belong to the user and must be left untouched.
-    const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
     if (!isAdoptedSession(s)) {
-      try {
-        execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
-        console.log(`  killed tmux ${tmuxName}`);
-      } catch { /* no tmux session */ }
+      const backend = sessionBackend(s);
+      const backendName = backend ? persistentSessionName(backend, s.sessionId) : `bmx-${s.sessionId.substring(0, 8)}`;
+      if (backend) {
+        killPersistentSession(backend, backendName);
+        console.log(`  killed ${backend} ${backendName}`);
+      } else if (sessionBackendType(s) !== 'pty') {
+        try {
+          execSync(`tmux kill-session -t '${backendName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
+          console.log(`  killed tmux ${backendName}`);
+        } catch { /* no legacy tmux session */ }
+      }
     }
 
     // Mark session as closed
