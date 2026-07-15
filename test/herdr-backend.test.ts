@@ -659,6 +659,7 @@ describe('HerdrBackend callbacks', () => {
   it('streams native terminal frames without pane polling or status waiters', async () => {
     setHerdrResponses([
       { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+
       {
         match: a => a.includes('agent') && a.includes('start'),
         reply: () => JSON.stringify({ result: { agent: { name: 'botmux', pane_id: 'w1:p1' } } }),

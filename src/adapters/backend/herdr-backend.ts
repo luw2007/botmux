@@ -120,6 +120,7 @@ export class HerdrBackend implements SessionBackend {
   private lastFrameSeq = 0;
   private pendingData = '';
   private readonly dataCbs: Array<(d: string) => void> = [];
+  private readonly snapshotCbs: Array<(snapshot: string) => void> = [];
   private readonly exitCbs: Array<(code: number | null, signal: string | null) => void> = [];
   private readonly agentName = 'botmux';
   private paneId: string | undefined;
@@ -348,6 +349,11 @@ export class HerdrBackend implements SessionBackend {
     const pending = this.pendingData;
     this.pendingData = '';
     try { cb(pending); } catch { /* listener crash must not kill the observer */ }
+  }
+
+  /** Full interpreted terminal frame for snapshot-aware web history merging. */
+  onSnapshot(cb: (snapshot: string) => void): void {
+    this.snapshotCbs.push(cb);
   }
 
   onExit(cb: (code: number | null, signal: string | null) => void): void {
