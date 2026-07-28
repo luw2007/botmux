@@ -403,6 +403,7 @@ describe('HerdrBackend web terminal sizing', () => {
     const attach = makeFakePty();
     mockedPtySpawn.mockReturnValue(attach as any);
     const be = spawnManagedBackend();
+    const resize = vi.spyOn(be, 'resize');
     const desktop = {};
     const mobile = {};
     const relayed: string[] = [];
@@ -410,6 +411,7 @@ describe('HerdrBackend web terminal sizing', () => {
 
     expect(be.acquireWebTerminal(desktop)).toBeNull();
     expect(be.resizeWebTerminal(desktop, 150, 42)).toEqual({ cols: 150, rows: 42 });
+    expect(resize).toHaveBeenCalledWith(150, 42);
     expect(mockedPtySpawn).toHaveBeenCalledTimes(1);
     expect(mockedPtySpawn).toHaveBeenCalledWith(
       'herdr',

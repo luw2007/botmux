@@ -3,6 +3,7 @@ import * as pty from 'node-pty';
 import xtermHeadless from '@xterm/headless';
 import type { BackendType, SessionBackend, SpawnOpts, SessionProbe } from './types.js';
 import { logger } from '../../utils/logger.js';
+import type { HerdrWebTerminalCursor, HerdrWebTerminalSize } from '../../utils/herdr-web-terminal-types.js';
 
 const { Terminal } = xtermHeadless;
 
@@ -40,15 +41,6 @@ const SETTLED_STATUSES = ['done', 'blocked', 'idle'] as const;
 
 type JsonCommandResult = { ok: true; value: any | undefined } | { ok: false };
 
-export interface HerdrWebTerminalSize {
-  cols: number;
-  rows: number;
-}
-
-export interface HerdrWebTerminalCursor {
-  col: number;
-  row: number;
-}
 
 function tryJsonCommand(args: string[], opts?: { timeout?: number; input?: string; env?: NodeJS.ProcessEnv }): JsonCommandResult {
   try {
@@ -302,6 +294,11 @@ export class HerdrBackend implements SessionBackend {
     this.write(text);
   }
 
+  /**
+   * Single size-update boundary for polling and terminal observers. Web viewers
+   * resize their attach separately, then call here so future observer rebuilds
+   * cannot diverge from ordinary backend resize handling.
+   */
   resize(cols: number, rows: number): void {
     this.cols = cols;
     this.rows = rows;
@@ -326,8 +323,7 @@ export class HerdrBackend implements SessionBackend {
     } else if (!this.startWebAttach(size)) {
       return null;
     }
-    this.cols = cols;
-    this.rows = rows;
+    this.resize(cols, rows);
     this.webSize = size;
     return size;
   }
@@ -458,6 +454,8 @@ export class HerdrBackend implements SessionBackend {
       this.webAttach = attach;
       this.resetWebCursorTracking();
       this.webCursorTerminal = cursorTerminal;
+      // Attach owns only resize and cursor coordinates. Polling remains the
+      // sole snapshot producer so Web history has one ordered source.
       attach.onData(data => {
         // The polling read API returns screen text but no cursor metadata. The
         // managed attach stream is the authoritative source for cursor moves;

@@ -109,6 +109,7 @@ import { createServer as createHttpServer, type IncomingMessage } from 'node:htt
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
 import { HerdrWebTerminalBinding } from './utils/herdr-web-terminal-binding.js';
+import { WEB_TERMINAL_SCROLL_BURST_SCRIPT } from './utils/web-terminal-scroll-burst.js';
 import { TERMINAL_FAVICON_DATA_URI } from './utils/terminal-favicon.js';
 import type {
   CodexAppTurnInput,
@@ -140,7 +141,8 @@ import { sessionReadyHookCommand } from './adapters/hook-command.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
-import { HerdrBackend, type HerdrWebTerminalCursor } from './adapters/backend/herdr-backend.js';
+import { HerdrBackend } from './adapters/backend/herdr-backend.js';
+import type { HerdrWebTerminalCursor } from './utils/herdr-web-terminal-types.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { TmuxPipeBackend } from './adapters/backend/tmux-pipe-backend.js';
 import { ZellijBackend, ZELLIJ_CONFIG_KDL } from './adapters/backend/zellij-backend.js';
@@ -7312,59 +7314,13 @@ window.addEventListener('resize',onViewportResize);
 // A high-resolution trackpad emits dozens of wheel events for one gesture, so
 // cap the whole continuous burst — not each browser event — then require an idle
 // gap (or direction reversal) before loading the next history chunk.
-var _scrollAccum=0,_scrollBurstTicks=0,_scrollBurstDir=0,_scrollBurstT=0;
-var _SCROLL_STEP=33;var _SCROLL_BURST_MAX=6;var _SCROLL_BURST_IDLE_MS=250;
-function _endScrollBurst(){
-  clearTimeout(_scrollBurstT);_scrollBurstT=0;
-  _scrollAccum=0;_scrollBurstTicks=0;_scrollBurstDir=0;
-}
-// Snapshot-backed remote TUIs can still accumulate useful local xterm history.
-// Consume it first; request another remote chunk only when the user pushes past
-// the local top/bottom boundary in that direction.
-function _canScrollLocal(px){
-  var b=term.buffer.active;
-  if(b.type==='alternate'||!px)return false;
-  if(!remoteScroll)return true;
-  return px>0||b.viewportY>0;
-}
-// Map a viewport pixel (clientX/Y) to a 1-based terminal cell "col;row", clamped to
-// the grid. The forwarded SGR wheel event MUST carry the cell UNDER THE POINTER, the
-// way a physical terminal reports it: zone-routed alt-screen TUIs — OpenCode (Bubble
-// Tea + bubblezone) — only scroll when the wheel lands inside the messages viewport's
-// mouse zone. A fixed (1,1) is the top-left border, outside that zone, so every
-// forwarded wheel was dropped and OpenCode wouldn't scroll at all. Coordinate-agnostic
-// CLIs (Claude Code etc.) scroll regardless of coords, which is why ONLY OpenCode broke.
-// Fall back to the grid CENTRE (never 1,1) when the screen geometry can't be read.
-function _cellAt(clientX,clientY){
-  var col=(term.cols>>1)+1,row=(term.rows>>1)+1;
-  try{
-    var sc=term.element&&term.element.querySelector('.xterm-screen');
-    var r=sc&&sc.getBoundingClientRect();
-    if(r&&r.width>0&&r.height>0){
-      col=Math.floor((clientX-r.left)/(r.width/term.cols))+1;
-      row=Math.floor((clientY-r.top)/(r.height/term.rows))+1;
-    }
-  }catch(_e){}
-  if(col<1)col=1;else if(col>term.cols)col=term.cols;
-  if(row<1)row=1;else if(row>term.rows)row=term.rows;
-  return col+';'+row;
-}
+${WEB_TERMINAL_SCROLL_BURST_SCRIPT}
+var _scrollBurst=createWebTerminalScrollBurst(function(data){ws_.send(JSON.stringify({type:'input',data:data}))});
+function _endScrollBurst(){_scrollBurst.end()}
 function _fwdScroll(px,coord){
   if(!hasToken||!ws_||ws_.readyState!==1||!px)return;
   coord=coord||(((term.cols>>1)+1)+';'+((term.rows>>1)+1)); // never (1,1)
-  var dir=px<0?-1:1;
-  if(_scrollBurstDir&&dir!==_scrollBurstDir){_scrollAccum=0;_scrollBurstTicks=0;}
-  _scrollBurstDir=dir;
-  clearTimeout(_scrollBurstT);_scrollBurstT=setTimeout(_endScrollBurst,_SCROLL_BURST_IDLE_MS);
-  if(_scrollBurstTicks>=_SCROLL_BURST_MAX)return;
-  _scrollAccum+=px;var data='',n=0;
-  while(Math.abs(_scrollAccum)>=_SCROLL_STEP&&n<6&&_scrollBurstTicks<_SCROLL_BURST_MAX){
-    var up=_scrollAccum<0; // px<0 → wheel-up (history)
-    data+='\\x1b[<'+(up?64:65)+';'+coord+'M';
-    _scrollAccum+=up?_SCROLL_STEP:-_SCROLL_STEP;n++;_scrollBurstTicks++;
-  }
-  if(_scrollBurstTicks>=_SCROLL_BURST_MAX)_scrollAccum=0;
-  if(data)ws_.send(JSON.stringify({type:'input',data:data}));
+  _scrollBurst.forward(px,coord);
 }
 if(!${isTmuxMode && !isPipeMode}){
   document.getElementById('terminal').addEventListener('wheel',function(e){

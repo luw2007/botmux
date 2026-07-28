@@ -1,7 +1,4 @@
-export interface HerdrWebTerminalSize {
-  cols: number;
-  rows: number;
-}
+import type { HerdrWebTerminalSize } from './herdr-web-terminal-types.js';
 
 export interface HerdrWebTerminalBackend {
   acquireWebTerminal(viewer: object): HerdrWebTerminalSize | null;

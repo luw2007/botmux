@@ -1,9 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  HerdrWebTerminalBinding,
-  type HerdrWebTerminalBackend,
-  type HerdrWebTerminalSize,
-} from '../src/utils/herdr-web-terminal-binding.js';
+import { HerdrWebTerminalBinding, type HerdrWebTerminalBackend } from '../src/utils/herdr-web-terminal-binding.js';
+import type { HerdrWebTerminalSize } from '../src/utils/herdr-web-terminal-types.js';
 
 function fakeBackend(existingSize: HerdrWebTerminalSize | null = null): HerdrWebTerminalBackend {
   return {

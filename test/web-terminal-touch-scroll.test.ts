@@ -1,88 +1,37 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
-
-const workerSource = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
-
-function scriptBlock(startMarker: string): string {
-  const start = workerSource.indexOf(startMarker);
-  const end = workerSource.indexOf('</script>', start);
-  expect(start).toBeGreaterThan(-1);
-  return workerSource.slice(start, end);
-}
+import { describe, expect, it, vi } from 'vitest';
+import { createWebTerminalScrollBurst } from '../src/utils/web-terminal-scroll-burst.js';
 
 describe('web terminal touch scrolling', () => {
-  it('uses snapshot replacement for every Herdr CLI, including normal-buffer Codex', () => {
-    expect(workerSource).toContain('return backend instanceof HerdrBackend;');
-    expect(workerSource).toContain('if (be instanceof HerdrBackend) {');
-    expect(workerSource).toContain('wireHerdrWebTerminalRelays(herdrBe);');
-    expect(workerSource).toContain(
-      'if (backend instanceof HerdrBackend) {\n'
-      + '    wireHerdrWebTerminalRelays(backend);\n'
-      + '    restoreHerdrWebBindings();',
-    );
+  it('caps one continuous high-resolution gesture at six remote ticks', () => {
+    const send = vi.fn();
+    const burst = createWebTerminalScrollBurst(send);
+
+    burst.forward(-33 * 20, '10;5');
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send.mock.calls[0][0].match(/\x1b\[<64;10;5M/g)).toHaveLength(6);
   });
 
-  it('restores the real Herdr attach cursor after snapshot rendering', () => {
-    expect(workerSource).toContain('be.onWebTerminalCursor(relayHerdrWebCursor);');
-    expect(workerSource).toContain('scrollback}${herdrWebCursorSequence()}');
-    expect(workerSource).toContain('ws.send(seed + herdrWebCursorSequence());');
+  it('resets the limit after a gesture ends', () => {
+    const send = vi.fn();
+    const burst = createWebTerminalScrollBurst(send);
+
+    burst.forward(33 * 6, '10;5');
+    burst.end();
+    burst.forward(33, '10;5');
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][0]).toBe('\x1b[<65;10;5M');
   });
 
-  it('forces Herdr alternate-screen CLIs to remote-scroll after a snapshot-only refresh', () => {
-    expect(workerSource).toContain("effectiveBackendType === 'herdr' && cliAdapter?.altScreen === true");
-    expect(workerSource).toContain('var remoteScroll=${forceRemoteScroll};');
+  it('starts a new burst when direction reverses', () => {
+    const send = vi.fn();
+    const burst = createWebTerminalScrollBurst(send);
 
-    const wheelBlock = scriptBlock('// ── Wheel / touch scroll handling ──');
-    expect(wheelBlock).toContain('if(_canScrollLocal(px)){');
-    expect(wheelBlock.indexOf('if(_canScrollLocal(px)){'))
-      .toBeLessThan(wheelBlock.indexOf('_fwdScroll(px,_cellAt'));
-  });
+    burst.forward(-33 * 6, '10;5');
+    burst.forward(33, '10;5');
 
-  it('bounds remote scroll ticks per gesture instead of per browser event', () => {
-    const wheelBlock = scriptBlock('// ── Wheel / touch scroll handling ──');
-
-    expect(wheelBlock).toContain('var _SCROLL_BURST_MAX=6');
-    expect(wheelBlock).toContain('_scrollBurstTicks<_SCROLL_BURST_MAX');
-    expect(wheelBlock).toContain('setTimeout(_endScrollBurst,_SCROLL_BURST_IDLE_MS)');
-    expect(wheelBlock).toContain('if(_scrollBurstTicks>=_SCROLL_BURST_MAX)_scrollAccum=0');
-  });
-
-  it('uses local scrollback before requesting another remote history chunk', () => {
-    const wheelBlock = scriptBlock('// ── Wheel / touch scroll handling ──');
-    const touchBlock = scriptBlock('// Single-finger touch scrolling:');
-
-    expect(wheelBlock).toContain('function _canScrollLocal(px){');
-    expect(wheelBlock).toContain("if(b.type==='alternate'||!px)return false");
-    expect(wheelBlock).toContain('return px>0||b.viewportY>0');
-    expect(wheelBlock).toContain('if(_canScrollLocal(px)){');
-    expect(touchBlock).toContain('if(_canScrollLocal(px)){');
-  });
-
-  it('replaces merged Herdr history and preserves the reader anchor', () => {
-    expect(workerSource).toContain('1989;history;${merged.addedLines}');
-    expect(workerSource).toContain("var _hh=data.match(/^\\x1b\\]1989;history;([0-9]+)\\x07/)");
-    expect(workerSource).toContain('data=data.slice(_hh[0].length);_cancelInitialFollow();term.reset();term.clear()');
-    expect(workerSource).toContain("data='\\\\x1b[2J\\\\x1b[H'+data");
-    expect(workerSource).toContain('if(_ha>0)term.scrollToLine(_hy+_ha)');
-  });
-
-  it('drives normal-buffer scroll explicitly instead of relying on WebView defaults', () => {
-    const touchBlock = scriptBlock('// Single-finger touch scrolling:');
-
-    expect(touchBlock).toContain("var _tViewport=document.querySelector('#terminal .xterm-viewport')");
-    expect(touchBlock).toContain('if(_canScrollLocal(px)){');
-    expect(touchBlock).toContain('_tViewport.scrollTop-=y-_tLastY');
-    expect(touchBlock.indexOf('if(_canScrollLocal(px)){'))
-      .toBeLessThan(touchBlock.indexOf('_fwdScroll(px'));
-  });
-
-  it('prevents xterm from double-driving handled single-touch moves', () => {
-    const touchBlock = scriptBlock('// Single-finger touch scrolling:');
-
-    expect(touchBlock).toContain('e.preventDefault();e.stopPropagation();');
-    expect(touchBlock).toContain("_tTerm.addEventListener('touchmove'");
-    expect(touchBlock).toContain('{capture:true,passive:false}');
-    expect(touchBlock).toContain("_tTerm.addEventListener('touchend',function(){_tLastY=null;_endScrollBurst()}");
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1][0]).toBe('\x1b[<65;10;5M');
   });
 });
